@@ -32,8 +32,12 @@ end
 
 function DefenseSystem.init(cfg)
     _cfg = cfg or {}
-    -- Require here to avoid circular dependency at module load time
-    FlightController = require(script.Parent.FlightController)
+    -- Resolve FlightController via registry (executor) or script.Parent (Studio)
+    if _G._Modules and _G._Modules["FlightController"] then
+        FlightController = _G._Modules["FlightController"]
+    else
+        FlightController = require(script.Parent.FlightController)
+    end
 end
 
 return DefenseSystem
