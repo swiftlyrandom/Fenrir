@@ -400,4 +400,6 @@ function FlightController.init(cfg)
     FlightController.resetManeuver()
 end
 
+-- Where is the bullshit
+
 return FlightController
