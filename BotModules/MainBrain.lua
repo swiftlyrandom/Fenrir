@@ -13,16 +13,26 @@ local RunService   = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players      = game:GetService("Players")
 
--- ── Subsystem requires (adjust paths to match your tree) ────
-local FlightController  = require(script.Parent.FlightController)
-local PerceptionSystem  = require(script.Parent.PerceptionSystem)
-local OpponentModel     = require(script.Parent.OpponentModel)
-local TacticalEvaluator = require(script.Parent.TacticalEvaluator)
-local WeaponSystem      = require(script.Parent.WeaponSystem)
-local DefenseSystem     = require(script.Parent.DefenseSystem)
-local LearningSystem    = require(script.Parent.LearningSystem)
-local DifficultyController = require(script.Parent.DifficultyController)
-local BotState          = require(script.Parent.BotState)
+-- ── Subsystem requires — resolved via loader registry ────────
+-- When running from an executor, _Modules is populated by the
+-- loader before MainBrain is loaded. When running inside Roblox
+-- Studio normally, fall back to script.Parent requires.
+local function _req(name)
+    if _G._Modules and _G._Modules[name] then
+        return _G._Modules[name]
+    end
+    return require(script.Parent[name])
+end
+
+local FlightController     = _req("FlightController")
+local PerceptionSystem     = _req("PerceptionSystem")
+local OpponentModel        = _req("OpponentModel")
+local TacticalEvaluator    = _req("TacticalEvaluator")
+local WeaponSystem         = _req("WeaponSystem")
+local DefenseSystem        = _req("DefenseSystem")
+local LearningSystem       = _req("LearningSystem")
+local DifficultyController = _req("DifficultyController")
+local BotState             = _req("BotState")
 
 -- ── Remote ──────────────────────────────────────────────────
 local Event = ReplicatedStorage:WaitForChild("Event")
