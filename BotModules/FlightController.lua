@@ -116,16 +116,31 @@ end
 
 --- Set forward thrust speed.
 local function setSpeed(body, speed)
-    local vel = body:FindFirstChild("BodyVelocity")
-    if not vel then return end
-    vel.VectorVelocity = body.CFrame.LookVector * speed
-    vel.MaxForce       = Vector3.new(1e5, 1e5, 1e5)
+	local vel = body:FindFirstChild("BodyVelocity")
+	if not vel then return end
+
+	local moveDir = body.CFrame.LookVector * speed
+
+	if vel:IsA("BodyVelocity") then
+		vel.Velocity = moveDir
+		vel.MaxForce = Vector3.new(1e5,1e5,1e5)
+
+	elseif vel:IsA("LinearVelocity") then
+		vel.VectorVelocity = moveDir
+		vel.MaxForce = 1e5
+	end
 end
 
 --- Stop all thrust.
 local function haltVelocity(body)
-    local vel = body:FindFirstChild("BodyVelocity")
-    if vel then vel.VectorVelocity = Vector3.zero end
+	local vel = body:FindFirstChild("BodyVelocity")
+	if not vel then return end
+
+	if vel:IsA("BodyVelocity") then
+		vel.Velocity = Vector3.zero
+	elseif vel:IsA("LinearVelocity") then
+		vel.VectorVelocity = Vector3.zero
+	end
 end
 
 -- ============================================================
