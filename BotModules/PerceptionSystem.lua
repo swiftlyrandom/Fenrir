@@ -1,58 +1,89 @@
 -- ============================================================
---  PerceptionSystem.lua  (STUB — expand in next pass)
---  Snapshots the game world around the bot.
+--  PerceptionSystem.lua
+--  Snapshots the world around the bot every decision tick.
+--  Scans all three plane types, filters to enemy team only,
+--  within the configured FOV radius.
 -- ============================================================
 
-local Players  = game:GetService("Players")
-local LocalPlayer = Players.LocalPlayer
+local Players = game:GetService("Players")
+local Teams   = game:GetService("Teams")
 
 local PerceptionSystem = {}
 local _cfg = {}
 
--- ── Team detection ──────────────────────────────────────────
-local function getEnemyTeam()
-    -- If a specific teamName is configured, use it.
-    -- Otherwise return the team the LocalPlayer is NOT on.
-    local myTeam = LocalPlayer.Team
-    for _, team in ipairs(game:GetService("Teams"):GetTeams()) do
+-- ── All recognised plane names ───────────────────────────────
+local PLANE_NAMES = {
+    ["Bomber"]         = true,
+    ["Torpedo Bomber"] = true,
+    ["Large Bomber"]   = true,
+}
+
+-- ============================================================
+--  HELPERS
+-- ============================================================
+
+local function clampDot(d)
+    return math.max(-1, math.min(1, d))
+end
+
+--- Returns the enemy team relative to LocalPlayer.
+local function getEnemyTeam(localPlayer)
+    if _cfg.teamName then
+        for _, team in ipairs(Teams:GetTeams()) do
+            if team.Name == _cfg.teamName then return team end
+        end
+    end
+    local myTeam = localPlayer.Team
+    for _, team in ipairs(Teams:GetTeams()) do
         if team ~= myTeam then return team end
     end
     return nil
 end
 
-local function isEnemy(player)
-    if player == LocalPlayer then return false end
-    local enemyTeam = getEnemyTeam()
+--- True if `player` is on the enemy team.
+local function isEnemy(player, localPlayer, enemyTeam)
+    if player == localPlayer then return false end
     if enemyTeam then
         return player.Team == enemyTeam
     end
-    -- Fallback: everyone is an enemy
-    return true
+    return true  -- no teams = FFA, everyone is enemy
 end
 
--- ── Vehicle finders (mirrors your existing helpers) ─────────
-local function getVehicle(vehicleName, playerName)
-    for _, v in ipairs(workspace:GetChildren()) do
-        if v.Name == vehicleName then
-            local owner = v:FindFirstChild("Owner")
-            if owner and owner.Value == playerName then return v end
+--- Find a vehicle in workspace owned by `ownerName`.
+--- Checks all three plane types.
+local function findVehicle(ownerName)
+    for _, obj in ipairs(workspace:GetChildren()) do
+        if PLANE_NAMES[obj.Name] then
+            local owner = obj:FindFirstChild("Owner")
+            if owner and owner.Value == ownerName then
+                return obj
+            end
         end
     end
+    return nil
 end
 
+--- Find the main controllable body inside a vehicle.
+--- Identified by having both BodyGyro and BodyVelocity.
 local function getMainBody(vehicle)
-    if not vehicle then return end
-    for _, x in ipairs(vehicle:GetDescendants()) do
-        if x:IsA("BasePart")
-           and x:FindFirstChild("BodyGyro")
-           and x:FindFirstChild("BodyVelocity") then
-            return x
+    if not vehicle then return nil end
+    for _, part in ipairs(vehicle:GetDescendants()) do
+        if part:IsA("BasePart")
+            and part:FindFirstChild("BodyGyro")
+            and part:FindFirstChild("BodyVelocity") then
+            return part
         end
     end
+    return nil
 end
 
--- ── Main snapshot ───────────────────────────────────────────
+-- ============================================================
+--  SNAPSHOT
+-- ============================================================
+
 function PerceptionSystem.snapshot(cfg)
+    local localPlayer = Players.LocalPlayer
+
     local percept = {
         selfBody      = nil,
         selfPos       = Vector3.zero,
@@ -61,12 +92,12 @@ function PerceptionSystem.snapshot(cfg)
         targets       = {},
         primaryTarget = nil,
         threats       = {},
-        ammoReady     = true,   -- TODO: hook into actual cooldown state
+        ammoReady     = true,
         bombReady     = true,
     }
 
-    -- ── Self ──────────────────────────────────────────────
-    local myVehicle = getVehicle(cfg.vehicleName, LocalPlayer.Name)
+    -- Locate bot's own vehicle
+    local myVehicle = findVehicle(localPlayer.Name)
     local myBody    = getMainBody(myVehicle)
     if not myBody then return percept end
 
@@ -75,59 +106,51 @@ function PerceptionSystem.snapshot(cfg)
     percept.selfVel      = myBody.AssemblyLinearVelocity
     percept.selfAltitude = myBody.Position.Y
 
-    -- ── Scan enemies within FOV radius ────────────────────
-    local fov = cfg.fovRadius or 2000
+    local enemyTeam = getEnemyTeam(localPlayer)
+    local fovRadius = (cfg and cfg.fovRadius) or _cfg.fovRadius or 2000
     local closestDist = math.huge
 
     for _, player in ipairs(Players:GetPlayers()) do
-        if isEnemy(player) then
-            local enemyVehicle = getVehicle(cfg.vehicleName, player.Name)
-            -- Also check any vehicle the enemy is in
-            local enemyBody = getMainBody(enemyVehicle)
+        if isEnemy(player, localPlayer, enemyTeam) then
+            local enemyBody = getMainBody(findVehicle(player.Name))
 
             if enemyBody then
-                local dist = (enemyBody.Position - myBody.Position).Magnitude
-                if dist <= fov then
-                    local relAngle = math.deg(math.acos(
-                        clampDot(myBody.CFrame.LookVector:Dot(
-                            (enemyBody.Position - myBody.Position).Unit
-                        ))
-                    ))
+                local ePos = enemyBody.Position
+                local dist = (ePos - myBody.Position).Magnitude
+
+                if dist <= fovRadius then
+                    local toEnemy  = (ePos - myBody.Position).Unit
+                    local dot      = clampDot(myBody.CFrame.LookVector:Dot(toEnemy))
+                    local angle    = math.deg(math.acos(dot))
+                    local isBehind = dot < -0.2
 
                     local targetInfo = {
                         player   = player,
-                        position = enemyBody.Position,
+                        position = ePos,
                         velocity = enemyBody.AssemblyLinearVelocity,
                         distance = dist,
-                        altitude = enemyBody.Position.Y,
-                        altDiff  = enemyBody.Position.Y - myBody.Position.Y,
-                        angle    = relAngle,   -- degrees off nose
+                        altitude = ePos.Y,
+                        altDiff  = ePos.Y - myBody.Position.Y,
+                        angle    = angle,
+                        isBehind = isBehind,
                     }
+
                     table.insert(percept.targets, targetInfo)
 
                     if dist < closestDist then
-                        closestDist = dist
+                        closestDist           = dist
                         percept.primaryTarget = targetInfo
+                    end
+
+                    if isBehind then
+                        table.insert(percept.threats, targetInfo)
                     end
                 end
             end
         end
     end
 
-    -- ── Threat scan (enemies behind us) ───────────────────
-    for _, t in ipairs(percept.targets) do
-        local toEnemy = (t.position - myBody.Position).Unit
-        local dot = myBody.CFrame.LookVector:Dot(toEnemy)
-        if dot < -0.3 then  -- ~100 ° behind us
-            table.insert(percept.threats, t)
-        end
-    end
-
     return percept
-end
-
-function clampDot(d)
-    return math.max(-1, math.min(1, d))
 end
 
 function PerceptionSystem.init(cfg)
