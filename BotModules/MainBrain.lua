@@ -1,187 +1,330 @@
--- MainBrain.lua
--- The only module that owns RunService connections.
--- Orchestrates all other systems in strict order each tick.
+-- ============================================================
+--  MainBrain.lua
+--  Top-level orchestrator. Runs the Sense→Analyze→Score→
+--  Execute→Reevaluate loop and wires all subsystems together.
+--
+--  USAGE (from a LocalScript on the bot's client):
+--    local Brain = require(path.to.MainBrain)
+--    Brain.init({ difficulty = "Hard" })
+--    Brain.start()
+-- ============================================================
 
-local RunService     = game:GetService("RunService")
+local RunService   = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-
--- Module imports (adjust paths to match your folder structure)
-local BotState           = require(script.Parent.BotState)
-local DifficultyController = require(script.Parent.DifficultyController)
-local PerceptionSystem   = require(script.Parent.PerceptionSystem)
-local LearningSystem     = require(script.Parent.LearningSystem)
-local OpponentModel      = require(script.Parent.OpponentModel)
-local TacticalEvaluator  = require(script.Parent.TacticalEvaluator)
-local FlightController   = require(script.Parent.FlightController)
-local WeaponSystem       = require(script.Parent.WeaponSystem)
-local DefenseSystem      = require(script.Parent.DefenseSystem)
-
--- Remote event used by WeaponSystem and engine control
-local Event = ReplicatedStorage:WaitForChild("Event")
-
-----------------------------------------------------
--- VEHICLE HELPERS  (identical to your provided code)
-----------------------------------------------------
-local VEHICLE_NAME = "Large Bomber"
 local Players      = game:GetService("Players")
-local LocalPlayer  = Players.LocalPlayer
 
-local function getVehicle()
-    for _, v in ipairs(workspace:GetChildren()) do
-        if v.Name == VEHICLE_NAME then
-            local owner = v:FindFirstChild("Owner")
-            if owner and owner.Value == LocalPlayer.Name then
-                return v
-            end
-        end
-    end
+-- ── Subsystem requires (adjust paths to match your tree) ────
+local FlightController  = require(script.Parent.FlightController)
+local PerceptionSystem  = require(script.Parent.PerceptionSystem)
+local OpponentModel     = require(script.Parent.OpponentModel)
+local TacticalEvaluator = require(script.Parent.TacticalEvaluator)
+local WeaponSystem      = require(script.Parent.WeaponSystem)
+local DefenseSystem     = require(script.Parent.DefenseSystem)
+local LearningSystem    = require(script.Parent.LearningSystem)
+local DifficultyController = require(script.Parent.DifficultyController)
+local BotState          = require(script.Parent.BotState)
+
+-- ── Remote ──────────────────────────────────────────────────
+local Event = ReplicatedStorage:WaitForChild("Event")
+local function fireEvent(...)
+    Event:FireServer(...)
 end
 
-local function getMainBody(vehicle)
-    if not vehicle then return nil end
-    for _, x in ipairs(vehicle:GetDescendants()) do
-        if x:IsA("BasePart") then
-            if x:FindFirstChild("BodyGyro") and x:FindFirstChild("BodyVelocity") then
-                return x
-            end
-        end
-    end
-end
-
-----------------------------------------------------
--- ENGINE CONTROL
-----------------------------------------------------
-local function startEngine(state)
-    -- Args match your provided startEngine remote: throttle, pitch, something
-    Event:FireServer("startEngine", { 8652.419607067108, 1.2, 40 })
-    state.engineRunning = true
-end
-
-local function stopEngine(state)
-    Event:FireServer("stopEngine")
-    state.engineRunning = false
-end
-
-----------------------------------------------------
--- MAINBRAIN
-----------------------------------------------------
+-- ============================================================
+--  MODULE TABLE
+-- ============================================================
 local MainBrain = {}
 
-function MainBrain.start(difficultyLevel)
-    local state = BotState.new()
+-- ── Runtime state ───────────────────────────────────────────
+local _running       = false
+local _loopConn      = nil
+local _accumulator   = 0          -- seconds since last decision tick
+local _config        = {}
 
-    -- 1. Apply difficulty settings before anything else
-    DifficultyController.apply(state, difficultyLevel or "Hard")
+-- ── Default config ──────────────────────────────────────────
+local DEFAULTS = {
+    difficulty      = "Hard",     -- Easy | Medium | Hard | Elite
+    vehicleName     = "Large Bomber",
+    teamName        = nil,        -- set to your team name; nil = auto-detect
+    fovRadius       = 2000,       -- stud sphere for perception
+    tickMin         = 0.10,       -- fastest decision rate (seconds)
+    tickMax         = 0.25,       -- slowest  decision rate (seconds)
+    engineSpeed     = 8652.419607067108, -- from your startEngine args
+    engineThrottle  = 1.2,
+    engineAltitude  = 40,
+    debugPrint      = false,
+}
 
-    -- 2. Wait for vehicle to appear in workspace
-    local waitStart = tick()
-    repeat
-        state.vehicle   = getVehicle()
-        state.mainBody  = getMainBody(state.vehicle)
-        task.wait(0.5)
-    until (state.mainBody ~= nil) or (tick() - waitStart > 15)
+-- ============================================================
+--  INTERNAL HELPERS
+-- ============================================================
 
-    if not state.mainBody then
-        warn("[MainBrain] Could not find vehicle mainBody after 15s. Aborting.")
-        return
+local function log(...)
+    if _config.debugPrint then
+        print("[MainBrain]", ...)
+    end
+end
+
+--- Derive tick interval from difficulty + situation urgency (0-1).
+local function getTickInterval(urgency)
+    local diff     = DifficultyController.get(_config.difficulty)
+    local baseMin  = _config.tickMin  * diff.reactionMult
+    local baseMax  = _config.tickMax  * diff.reactionMult
+    -- High urgency → tick faster
+    return baseMin + (baseMax - baseMin) * (1 - urgency)
+end
+
+-- ============================================================
+--  ENGINE MANAGEMENT
+-- ============================================================
+
+local _engineRunning = false
+
+local function startEngine()
+    if _engineRunning then return end
+    fireEvent("startEngine", {
+        _config.engineSpeed,
+        _config.engineThrottle,
+        _config.engineAltitude,
+    })
+    _engineRunning = true
+    log("Engine started.")
+end
+
+local function stopEngine()
+    if not _engineRunning then return end
+    fireEvent("stopEngine")
+    _engineRunning = false
+    log("Engine stopped.")
+end
+
+-- ============================================================
+--  DECISION LOOP PHASES
+-- ============================================================
+
+--[[
+    Phase 1 – SENSE
+    Ask PerceptionSystem to snapshot the world around us.
+    Returns a `percept` table:
+      {
+        selfBody      : BasePart,
+        selfPos       : Vector3,
+        selfVel       : Vector3,
+        selfAltitude  : number,
+        targets       : { [i] = TargetInfo },
+        primaryTarget : TargetInfo | nil,
+        threats       : { [i] = ThreatInfo },
+        ammoReady     : bool,
+        bombReady     : bool,
+      }
+--]]
+local function sense()
+    return PerceptionSystem.snapshot({
+        vehicleName = _config.vehicleName,
+        fovRadius   = _config.fovRadius,
+        teamName    = _config.teamName,
+    })
+end
+
+--[[
+    Phase 2 – ANALYZE
+    Update the opponent model with fresh observations.
+    Returns the enriched percept (adds opponentProfile field).
+--]]
+local function analyze(percept)
+    if percept.primaryTarget then
+        OpponentModel.observe(percept.primaryTarget)
+        percept.opponentProfile = OpponentModel.getProfile(percept.primaryTarget.player)
+    end
+    return percept
+end
+
+--[[
+    Phase 3 – SCORE ACTIONS
+    TacticalEvaluator returns a sorted list:
+      { { action="attack", score=0.9 }, { action="climb", score=0.6 }, ... }
+--]]
+local function scoreActions(percept)
+    local diff = DifficultyController.get(_config.difficulty)
+    return TacticalEvaluator.evaluate(percept, diff)
+end
+
+--[[
+    Phase 4 – CHOOSE
+    Pick the highest-scoring action, applying difficulty noise.
+    Elite  → always picks best.
+    Hard   → 90 % best, 10 % second-best.
+    Medium → 75 % best.
+    Easy   → 60 % best.
+--]]
+local function chooseAction(ranked, difficulty)
+    local noise = DifficultyController.get(difficulty).choiceNoise
+    if #ranked == 0 then return "idle" end
+    if #ranked >= 2 and math.random() < noise then
+        return ranked[2].action   -- intentional sub-optimal choice
+    end
+    return ranked[1].action
+end
+
+--[[
+    Phase 5 – EXECUTE
+    Route the chosen action to the right subsystem.
+--]]
+local function execute(action, percept)
+    local body = percept.selfBody
+    if not body then return end
+
+    -- ── Movement actions ──────────────────────────────────
+    if action == "attack" then
+        FlightController.intercept(body, percept.primaryTarget.position)
+
+    elseif action == "bomb_run" then
+        FlightController.approachBomb(body, percept.primaryTarget.position)
+        WeaponSystem.tryBomb(percept)
+
+    elseif action == "climb" then
+        FlightController.climb(body, _config.difficulty)
+
+    elseif action == "dive" then
+        FlightController.dive(body, _config.difficulty)
+
+    elseif action == "disengage" then
+        FlightController.disengage(body, percept)
+
+    elseif action == "reset_distance" then
+        FlightController.resetDistance(body, percept.primaryTarget and percept.primaryTarget.position)
+
+    elseif action == "ambush" then
+        FlightController.ambush(body, percept.primaryTarget.position)
+
+    elseif action == "bait" then
+        FlightController.bait(body, percept)
+
+    elseif action == "evade" then
+        DefenseSystem.evade(body, percept)
+
+    elseif action == "idle" then
+        FlightController.cruise(body)
     end
 
-    -- 3. Start engine
-    startEngine(state)
-    task.wait(1.0)  -- give engine a moment to spool up
+    -- ── Shooting (independent of movement action) ────────
+    if percept.primaryTarget and action ~= "evade" and action ~= "disengage" then
+        WeaponSystem.tryShoot(percept, DifficultyController.get(_config.difficulty))
+    end
 
-    -- 4. Find initial target (first enemy player with a vehicle)
-    state.targetEnemy = MainBrain._findBestTarget(state)
+    -- ── Persistent defense checks ─────────────────────────
+    DefenseSystem.checkPassive(body, percept)
+end
 
-    -- 5. Main decision loop
-    RunService.Heartbeat:Connect(function(dt)
-        local now = tick()
+--[[
+    Phase 6 – REEVALUATE
+    Feed outcome data back into LearningSystem and BotState.
+--]]
+local function reevaluate(action, percept)
+    LearningSystem.record(action, percept)
+    BotState.update(action, percept)
+end
 
-        -- Throttle to configured loop interval
-        if (now - state.timing.lastLoopTime) < state.difficulty.loopInterval then
-            return
-        end
-        state.timing.deltaTime    = now - state.timing.lastLoopTime
-        state.timing.lastLoopTime = now
+-- ============================================================
+--  MAIN TICK (called every Heartbeat, gated by accumulator)
+-- ============================================================
 
-        -- Safety: re-acquire vehicle if lost (respawn case)
-        if not state.mainBody or not state.mainBody.Parent then
-            state.vehicle  = getVehicle()
-            state.mainBody = getMainBody(state.vehicle)
-            if not state.mainBody then return end
-            startEngine(state)
-        end
+local function tick(dt)
+    -- ── Urgency: how pressed are we? (0 = calm, 1 = critical)
+    local urgency = BotState.getUrgency()
+    local interval = getTickInterval(urgency)
 
-        -- Refresh target if lost
-        if not state.targetEnemy or not state.targetEnemy.Character then
-            state.targetEnemy = MainBrain._findBestTarget(state)
-        end
-        if not state.targetEnemy then return end  -- no valid target, idle
+    _accumulator = _accumulator + dt
+    if _accumulator < interval then return end
+    _accumulator = 0
 
-        -- ============================================================
-        -- SENSE → ANALYZE → SCORE → CHOOSE → EXECUTE → REEVALUATE
-        -- ============================================================
+    -- ── 6-phase loop ────────────────────────────────────────
+    local ok, err = pcall(function()
+        local percept = sense()
+        if not percept.selfBody then return end  -- not in a vehicle yet
 
-        -- SENSE
-        PerceptionSystem.update(state)
+        percept  = analyze(percept)
+        local ranked = scoreActions(percept)
+        local action = chooseAction(ranked, _config.difficulty)
 
-        -- ANALYZE (opponent learning, runs on its own slower interval)
-        if (now - state.timing.lastLearnTime) >= state.timing.learnInterval then
-            LearningSystem.observe(state)
-            OpponentModel.recompute(state)
-            state.timing.lastLearnTime = now
-        end
+        log("Action:", action, "| Target:", percept.primaryTarget and percept.primaryTarget.player.Name or "none")
 
-        -- SCORE + CHOOSE
-        TacticalEvaluator.evaluate(state)
-
-        -- EXECUTE
-        -- Defense can override flight heading — run it first
-        DefenseSystem.update(state)
-
-        -- Flight and weapons run after defense has had its say
-        FlightController.update(state)
-        WeaponSystem.update(state, Event)
-
-        -- REEVALUATE
-        -- Decay actionHoldTimer so TacticalEvaluator can switch actions
-        if state.tactical.actionHoldTimer > 0 then
-            state.tactical.actionHoldTimer = state.tactical.actionHoldTimer - state.timing.deltaTime
-        end
+        execute(action, percept)
+        reevaluate(action, percept)
     end)
+
+    if not ok then
+        warn("[MainBrain] tick error:", err)
+    end
 end
 
--- Scans all players, returns the one closest to us with a live vehicle
-function MainBrain._findBestTarget(state)
-    local bestPlayer = nil
-    local bestDist   = math.huge
+-- ============================================================
+--  PUBLIC API
+-- ============================================================
 
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player == LocalPlayer then continue end
-        -- Try to find their vehicle mainBody
-        for _, v in ipairs(workspace:GetChildren()) do
-            if v.Name == VEHICLE_NAME then
-                local owner = v:FindFirstChild("Owner")
-                if owner and owner.Value == player.Name then
-                    local body = getMainBody(v)
-                    if body then
-                        local dist = (body.Position - state.mainBody.Position).Magnitude
-                        if dist < bestDist then
-                            bestDist   = dist
-                            bestPlayer = player
-                        end
-                    end
-                end
-            end
-        end
+--- Initialize the bot with optional config overrides.
+--- Call once before start().
+function MainBrain.init(cfg)
+    _config = setmetatable(cfg or {}, { __index = DEFAULTS })
+
+    -- Seed RNG for difficulty noise
+    math.randomseed(tick())
+
+    -- Init subsystems
+    DifficultyController.init(_config.difficulty)
+    FlightController.init(_config)
+    WeaponSystem.init(_config, fireEvent)
+    DefenseSystem.init(_config)
+    PerceptionSystem.init(_config)
+    OpponentModel.init()
+    TacticalEvaluator.init(_config)
+    LearningSystem.init()
+    BotState.init()
+
+    log("Initialized. Difficulty:", _config.difficulty)
+end
+
+--- Start the decision loop and engine.
+function MainBrain.start()
+    if _running then return end
+    _running = true
+
+    startEngine()
+
+    _loopConn = RunService.Heartbeat:Connect(function(dt)
+        tick(dt)
+    end)
+
+    log("Bot started.")
+end
+
+--- Stop the decision loop and cut engine.
+function MainBrain.stop()
+    if not _running then return end
+    _running = false
+
+    if _loopConn then
+        _loopConn:Disconnect()
+        _loopConn = nil
     end
 
-    return bestPlayer
+    stopEngine()
+    -- Ensure guns stop
+    WeaponSystem.stopFiring()
+
+    log("Bot stopped.")
 end
 
--- Clean shutdown (call if bot is destroyed mid-game)
-function MainBrain.stop(state)
-    stopEngine(state)
+--- Hard-set difficulty at runtime (useful for adaptive challenge).
+function MainBrain.setDifficulty(level)
+    _config.difficulty = level
+    DifficultyController.init(level)
+    log("Difficulty changed to:", level)
+end
+
+--- Expose config for external reads (read-only pattern).
+function MainBrain.getConfig()
+    return _config
 end
 
 return MainBrain
