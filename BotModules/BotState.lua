@@ -1,155 +1,48 @@
--- BotState.lua
--- Returns a fresh state table for one bot instance.
--- MainBrain calls this once on startup.
-
+-- ============================================================
+--  BotState.lua
+--  Lightweight runtime state snapshot.
+--  Urgency drives tick rate — high urgency = faster decisions.
+-- ============================================================
 local BotState = {}
 
-function BotState.new()
-    return {
+local _state = {
+    lastAction  = "idle",
+    urgency     = 0.0,   -- 0 = calm, 1 = critical
+    inCombat    = false,
+    tickCount   = 0,
+}
 
-        -- ------------------------------------------------
-        -- IDENTITY
-        -- ------------------------------------------------
-        botPlayer       = nil,   -- LocalPlayer reference
-        vehicle         = nil,   -- vehicle Model
-        mainBody        = nil,   -- BasePart with BodyGyro + BodyVelocity
-        engineRunning   = false,
-        targetEnemy     = nil,   -- current primary target (Player or nil)
+--- Called after each execute phase.
+function BotState.update(action, percept)
+    _state.lastAction = action
+    _state.tickCount  = _state.tickCount + 1
+    _state.inCombat   = percept.primaryTarget ~= nil
 
-        -- ------------------------------------------------
-        -- DIFFICULTY  (set by DifficultyController)
-        -- ------------------------------------------------
-        difficulty = {
-            level             = "Hard",  -- "Easy"|"Medium"|"Hard"|"Elite"
-            reactionDelay     = 0.15,    -- seconds before acting on new info
-            aimConfidence     = 0.65,    -- minimum hit probability to fire
-            aggressionBias    = 0.5,     -- 0=passive, 1=hyper-aggressive
-            defenseThreshold  = 0.45,    -- threat score that triggers defense
-            learningRate      = 0.08,    -- how fast OpponentModel updates
-            loopInterval      = 0.15,    -- decision loop seconds
-        },
+    -- Urgency: max out when threats are behind us and we're low
+    local threatCount = #(percept.threats or {})
+    local lowAlt = (percept.selfAltitude or 999) < 150 and 1 or 0
+    _state.urgency = math.min(1, (threatCount * 0.4) + (lowAlt * 0.3)
+                                + (action == "evade" and 0.3 or 0))
+end
 
-        -- ------------------------------------------------
-        -- PERCEPTION  (written by PerceptionSystem each tick)
-        -- ------------------------------------------------
-        perception = {
-            enemyPosition     = Vector3.zero,
-            enemyVelocity     = Vector3.zero,
-            enemyAltitude     = 0,
-            selfPosition      = Vector3.zero,
-            selfVelocity      = Vector3.zero,
-            selfAltitude      = 0,
-            altitudeDelta     = 0,      -- enemy alt - self alt (+ means enemy higher)
-            distance          = 999,
-            hasLOS            = false,  -- line-of-sight clear
-            relativeAngle     = 0,      -- degrees: 0=head-on, 180=enemy behind
-            enemyBearing      = 0,      -- compass degrees to enemy
-            incomingThreat    = false,  -- enemy gun/bomb aimed near us
-            threatScore       = 0,      -- 0..1 composite danger level
-            ammoReady         = true,
-            bombReady         = false,
-            gunCooldown       = 0,
-            mapDangerZone     = false,  -- are we inside a flagged danger area
-        },
+function BotState.getUrgency()
+    return _state.urgency
+end
 
-        -- ------------------------------------------------
-        -- OPPONENT MODEL  (written by LearningSystem / OpponentModel)
-        -- ------------------------------------------------
-        opponentProfile = {
-            -- raw counters (increment every observed maneuver)
-            breakLeftCount    = 0,
-            breakRightCount   = 0,
-            headOnCount       = 0,
-            chaseCount        = 0,
-            climbCount        = 0,
-            diveCount         = 0,
-            panicCount        = 0,
-            totalObservations = 0,
+function BotState.getLastAction()
+    return _state.lastAction
+end
 
-            -- derived probabilities (recomputed after each counter update)
-            breakLeftChance   = 0.5,
-            breakRightChance  = 0.5,
-            headOnChance      = 0.3,
-            chaseChance       = 0.5,
-            climbChance       = 0.5,
-            diveChance        = 0.5,
-            aggressionLevel   = 0.5,   -- 0=passive, 1=aggressive
+function BotState.isInCombat()
+    return _state.inCombat
+end
 
-            -- last observed position (used to classify maneuvers)
-            lastEnemyPos      = Vector3.zero,
-            lastEnemyVel      = Vector3.zero,
-            lastSampleTime    = 0,
-        },
-
-        -- ------------------------------------------------
-        -- TACTICAL  (written by TacticalEvaluator)
-        -- ------------------------------------------------
-        tactical = {
-            -- all scored actions this tick
-            actionScores = {
-                attackPass    = 0,
-                disengage     = 0,
-                climb         = 0,
-                dive          = 0,
-                ambush        = 0,
-                bombRun       = 0,
-                bait          = 0,
-                evade         = 0,
-                resetDistance = 0,
-            },
-            chosenAction      = "resetDistance",  -- default safe action
-            previousAction    = nil,
-            actionHoldTimer   = 0,    -- prevents flip-flopping every tick
-            actionHoldMin     = 1.0,  -- minimum seconds to hold an action
-        },
-
-        -- ------------------------------------------------
-        -- FLIGHT CONTROL  (written by FlightController)
-        -- ------------------------------------------------
-        flight = {
-            targetHeading     = Vector3.zero,   -- world-space aim point
-            currentSpeed      = 0,
-            desiredSpeed      = 100,
-            minSpeed          = 40,             -- stall threshold
-            maxSpeed          = 220,
-            weaveOffset       = Vector3.zero,   -- sinusoidal evasion displacement
-            weavePhase        = 0,              -- radians, incremented each tick
-            interceptPoint    = Vector3.zero,   -- predicted intercept pos
-        },
-
-        -- ------------------------------------------------
-        -- WEAPON  (written by WeaponSystem)
-        -- ------------------------------------------------
-        weapon = {
-            aimPoint          = Vector3.zero,   -- world-space predicted target pos
-            hitConfidence     = 0,              -- 0..1
-            burstActive       = false,
-            burstTimer        = 0,
-            burstDuration     = 0.25,           -- seconds per burst
-            burstCooldown     = 0.6,
-            bombDropQueued    = false,
-        },
-
-        -- ------------------------------------------------
-        -- DEFENSE  (written by DefenseSystem)
-        -- ------------------------------------------------
-        defense = {
-            active            = false,
-            maneuver          = nil,    -- "weave"|"splitS"|"barrelRoll"|"disengage"
-            maneuverTimer     = 0,
-            maneuverDuration  = 2.0,
-            overrideHeading   = nil,    -- if set, FlightController uses this instead
-        },
-
-        -- ------------------------------------------------
-        -- TIMING  (internal clock for the MainBrain loop)
-        -- ------------------------------------------------
-        timing = {
-            lastLoopTime      = 0,
-            lastLearnTime     = 0,
-            learnInterval     = 0.5,   -- OpponentModel updated every 0.5s
-            deltaTime         = 0,
-        },
+function BotState.init()
+    _state = {
+        lastAction = "idle",
+        urgency    = 0.0,
+        inCombat   = false,
+        tickCount  = 0,
     }
 end
 
