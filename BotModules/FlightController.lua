@@ -89,13 +89,29 @@ local CONFIG = {
 --- Set heading toward a world-space target position.
 --- lerpFactor (0-1): how fast to rotate each frame.
 local function setHeading(body, targetPos, lerpFactor)
-    local gyro = body:FindFirstChild("BodyGyro")
-    if not gyro then return end
+	local gyro = body:FindFirstChild("BodyGyro")
+	if not gyro then return end
 
-    local desired = CFrame.new(body.Position, targetPos)
-    gyro.CFrame       = gyro.CFrame:Lerp(desired, lerpFactor or CONFIG.headingLerpFast)
-    gyro.D            = CONFIG.gyroDampening
-    gyro.MaxTorque    = Vector3.new(CONFIG.gyroMaxTorque, CONFIG.gyroMaxTorque, CONFIG.gyroMaxTorque)
+	local desired = CFrame.new(body.Position, targetPos)
+
+	if gyro:IsA("BodyGyro") then
+		gyro.CFrame = gyro.CFrame:Lerp(
+			desired,
+			lerpFactor or CONFIG.headingLerpFast
+		)
+
+		gyro.D = CONFIG.gyroDampening
+		gyro.MaxTorque = Vector3.new(
+			CONFIG.gyroMaxTorque,
+			CONFIG.gyroMaxTorque,
+			CONFIG.gyroMaxTorque
+		)
+
+	elseif gyro:IsA("AlignOrientation") then
+		gyro.CFrame = desired
+		gyro.Responsiveness = 25
+		gyro.MaxTorque = CONFIG.gyroMaxTorque
+	end
 end
 
 --- Set forward thrust speed.
