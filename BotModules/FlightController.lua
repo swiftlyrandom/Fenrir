@@ -399,6 +399,5 @@ function FlightController.init(cfg)
 
     FlightController.resetManeuver()
 end
-print(body.BodyGyro.ClassName)
-print(body.BodyVelocity.ClassName)
+
 return FlightController
