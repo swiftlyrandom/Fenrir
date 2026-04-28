@@ -28,7 +28,7 @@ function LearningSystem.markSuccess(action)
     end
 end
 
---- Returns success rate for an action (0–1). Default 0.5 (unknown).
+--- Returns success rate for an action (0-1). Default 0.5 (unknown).
 function LearningSystem.getSuccessRate(action)
     local s = actionStats[action]
     if not s or s.attempts == 0 then return 0.5 end
