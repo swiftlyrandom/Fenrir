@@ -11,6 +11,8 @@
 -- ============================================================
 
 local RunService = game:GetService("RunService")
+weaveAmplitude = 40,   -- raise this for wider/taller dodges overall
+weavePeriod    = 1.4,  -- lower = faster direction changes
 
 -- ── Helpers ─────────────────────────────────────────────────
 local function lerp(a, b, t)
