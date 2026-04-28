@@ -373,9 +373,9 @@ end
 --- Internal: begin a stall. Cuts engine, zeroes velocity.
 local function beginStall(body, maneuverTag)
     if _stall.active then return end
-    if body.Position.Y < CONFIG.stallMinAltitude then return end
-    if not _engineControl then return end
-
+    if body.Position.Y < CONFIG.stallMinAltitude then print("[Stall] Blocked - too low:", body.Position.Y) return end
+    if not _engineControl then print("[Stall] Blocked - no engineControl callback") return end
+    print("[Stall] BEGIN:", maneuverTag, "| Alt:", body.Position.Y)
     _stall.active   = true
     _stall.timer    = 0
     _stall.maneuver = maneuverTag
@@ -409,6 +409,7 @@ function FlightController.stallTick(body, dt)
     haltVelocity(body)
 
     if _stall.timer >= CONFIG.stallDuration then
+        print("[Stall] END:", _stall.maneuver, "| duration:", _stall.timer)
         endStall()
     end
 
