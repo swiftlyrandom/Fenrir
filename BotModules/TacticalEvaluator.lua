@@ -42,13 +42,13 @@ end
 local function attackScoreForDist(dist)
     if dist < 150 then
         -- Inside minimum — can't aim properly
-        return 0.3 + (dist / 150) * 0.3   -- 0.3 → 0.6
+        return 0.3 + (dist / 150) * 0.3   -- 0.3 -> 0.6
     elseif dist <= 700 then
         -- Ideal engagement range
         return 0.85
     elseif dist <= 1200 then
         -- Acceptable but degrading
-        return 0.85 - ((dist - 700) / 500) * 0.4   -- 0.85 → 0.45
+        return 0.85 - ((dist - 700) / 500) * 0.4   -- 0.85 -> 0.45
     else
         -- Too far
         return 0.1
