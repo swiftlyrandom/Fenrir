@@ -45,11 +45,16 @@ end
 -- ============================================================
 local MainBrain = {}
 
--- ── Runtime state ───────────────────────────────────────────
+-- Runtime state
 local _running       = false
 local _loopConn      = nil
-local _accumulator   = 0          -- seconds since last decision tick
+local _accumulator   = 0
 local _config        = {}
+
+-- Last decided action + percept — re-executed every Heartbeat
+-- so the plane never coasts between decision ticks
+local _lastAction  = "idle"
+local _lastPercept = nil
 
 -- ── Default config ──────────────────────────────────────────
 local DEFAULTS = {
@@ -57,8 +62,8 @@ local DEFAULTS = {
     vehicleName     = "Large Bomber",
     teamName        = nil,        -- set to your team name; nil = auto-detect
     fovRadius       = 2000,       -- stud sphere for perception
-    tickMin         = 0.10,       -- fastest decision rate (seconds)
-    tickMax         = 0.25,       -- slowest  decision rate (seconds)
+    tickMin         = 0.05,       -- fastest decision rate (seconds)
+    tickMax         = 0.15,       -- slowest  decision rate (seconds)
     engineSpeed     = 8652.419607067108, -- from your startEngine args
     engineThrottle  = 1.2,
     engineAltitude  = 40,
@@ -277,32 +282,53 @@ end
 --  MAIN TICK (called every Heartbeat, gated by accumulator)
 -- ============================================================
 
+-- ============================================================
+--  MAIN TICK
+--  Called every Heartbeat.
+--  Decision phase is gated by accumulator (0.07-0.175s on Elite).
+--  Execution phase runs every Heartbeat so the plane never coasts.
+-- ============================================================
+
 local function brainTick(dt)
-    -- Urgency: how pressed are we? (0 = calm, 1 = critical)
-    local urgency = BotState.getUrgency()
+    local urgency  = BotState.getUrgency()
     local interval = getTickInterval(urgency)
 
+    -- ── Continuous execution — runs every Heartbeat ───────────
+    -- Re-applies the last chosen action every frame so heading
+    -- and speed are always fresh regardless of decision rate.
+    if _lastPercept and _lastPercept.selfBody then
+        local ok2, err2 = pcall(function()
+            execute(_lastAction, _lastPercept, dt)
+        end)
+        if not ok2 then
+            warn("[MainBrain] execute error:", err2)
+        end
+    end
+
+    -- ── Gated decision phase ──────────────────────────────────
     _accumulator = _accumulator + dt
     if _accumulator < interval then return end
     _accumulator = 0
 
-    -- 6-phase loop
     local ok, err = pcall(function()
         local percept = sense()
         if not percept.selfBody then return end
 
-        percept  = analyze(percept)
+        percept = analyze(percept)
         local ranked = scoreActions(percept)
         local action = chooseAction(ranked, _config.difficulty)
 
         log("Action:", action, "| Target:", percept.primaryTarget and percept.primaryTarget.player.Name or "none")
 
-        execute(action, percept, dt)
+        -- Store for continuous execution above
+        _lastAction  = action
+        _lastPercept = percept
+
         reevaluate(action, percept)
     end)
 
     if not ok then
-        warn("[MainBrain] tick error:", err)
+        warn("[MainBrain] decision error:", err)
     end
 end
 
