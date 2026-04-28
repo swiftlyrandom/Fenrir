@@ -293,7 +293,7 @@ function FlightController.weave(body, dt)
     -- Vertical cosine wave at half frequency — creates a figure-8
     -- style path so the bot isn't locked to a flat Y plane.
     -- Clamped so it never weaves into the ground.
-    local vertOffset = math.cos(c * freq * 0.5) * (CONFIG.weaveAmplitude * 0.7)
+    local vertOffset = math.cos(c * freq) * (CONFIG.weaveAmplitude * 1.2)
     local projectedY = body.Position.Y + vertOffset
     if projectedY < CONFIG.minSafeAltitude + 30 then
         vertOffset = math.abs(vertOffset)   -- force upward near ground
