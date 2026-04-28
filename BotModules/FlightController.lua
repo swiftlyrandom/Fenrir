@@ -47,8 +47,6 @@ local _maneuver = {
 --  CONFIG (overridden partially by MainBrain.init)
 -- ============================================================
 local CONFIG = {
-    weaveAmplitude = 40,   -- raise this for wider/taller dodges overall
-    weavePeriod    = 1.4,  -- lower = faster direction changes
     
     -- Turning
     gyroDampening     = 0.8,
@@ -75,7 +73,7 @@ local CONFIG = {
     leadCoeff         = 1.2,
 
     -- Weave
-    weaveAmplitude    = 40,
+    weaveAmplitude    = 50,
     weavePeriod       = 1.4,
 
     -- Split-S
