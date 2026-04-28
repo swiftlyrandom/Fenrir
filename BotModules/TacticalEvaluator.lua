@@ -6,66 +6,167 @@
 local TacticalEvaluator = {}
 local _cfg = {}
 
--- All actions the bot can take
 local ACTIONS = {
     "attack", "bomb_run", "climb", "dive",
     "disengage", "reset_distance", "ambush",
     "bait", "evade", "idle"
 }
 
+-- ============================================================
+--  HELPERS
+-- ============================================================
+
+--- Threat urgency: 0 = no real threat, 1 = critical.
+--- Factors in how many threats, how close, and how directly
+--- behind us they are. A single enemy 1800 studs back barely
+--- registers; one 100 studs directly behind is critical.
+local function threatUrgency(percept)
+    if #percept.threats == 0 then return 0 end
+
+    local worst = 0
+    for _, threat in ipairs(percept.threats) do
+        -- Closer = more urgent (normalised over 800 studs)
+        local distFactor = 1 - math.min(threat.distance / 800, 1)
+        -- More directly behind = more urgent
+        -- threat.angle is degrees off our nose; 180 = dead behind
+        local angleFactor = math.max(0, (threat.angle - 90) / 90)  -- 0 at 90°, 1 at 180°
+        local urgency = distFactor * 0.6 + angleFactor * 0.4
+        if urgency > worst then worst = urgency end
+    end
+    return worst
+end
+
+--- Attack score based on distance. Sweet spot 300-700 studs.
+--- Falls off sharply below 150 (too close) and above 1000 (too far).
+local function attackScoreForDist(dist)
+    if dist < 150 then
+        -- Inside minimum — can't aim properly
+        return 0.3 + (dist / 150) * 0.3   -- 0.3 → 0.6
+    elseif dist <= 700 then
+        -- Ideal engagement range
+        return 0.85
+    elseif dist <= 1200 then
+        -- Acceptable but degrading
+        return 0.85 - ((dist - 700) / 500) * 0.4   -- 0.85 → 0.45
+    else
+        -- Too far
+        return 0.1
+    end
+end
+
+-- ============================================================
+--  EVALUATE
+-- ============================================================
+
 --- Returns sorted { {action, score}, ... } highest first.
 function TacticalEvaluator.evaluate(percept, diff)
-    local scores = {}
-    local t = percept.primaryTarget
-    local hasThreat = #percept.threats > 0
+    local scores  = {}
+    local t       = percept.primaryTarget
+    local urgency = threatUrgency(percept)   -- 0-1, replaces hasThreat bool
 
     for _, action in ipairs(ACTIONS) do
         local score = 0
 
+        -- ── Idle ─────────────────────────────────────────────
         if action == "idle" then
-            score = t and 0.0 or 0.5
+            score = t and 0.0 or 0.4
 
+        -- ── Attack ───────────────────────────────────────────
+        -- Only penalise attack if the threat urgency is HIGH (>0.6).
+        -- A mild threat behind us should not stop us from attacking.
         elseif action == "attack" then
             if t then
-                local dist = t.distance
-                -- Sweet spot: 200-800 studs
-                score = 0.85 - math.abs(dist - 500) / 1000
-                if hasThreat then score = score - 0.3 end
+                score = attackScoreForDist(t.distance)
+                -- Penalty scales with urgency, but never drops attack
+                -- below 0.5 so it stays competitive with evade
+                if urgency > 0.6 then
+                    score = score - (urgency - 0.6) * 0.5
+                end
+                score = math.max(score, 0)
             end
 
+        -- ── Evade ────────────────────────────────────────────
+        -- Only dominates when urgency is genuinely high.
+        -- Low-urgency threats don't justify full evasion.
         elseif action == "evade" then
-            score = hasThreat and 0.9 or 0.0
+            if urgency > 0.3 then
+                -- Scale from 0.45 (mild) up to 0.85 (critical)
+                score = 0.45 + (urgency - 0.3) / 0.7 * 0.40
+            end
 
+        -- ── Disengage ────────────────────────────────────────
+        -- Only when critically threatened AND low altitude.
+        elseif action == "disengage" then
+            local lowAlt = percept.selfAltitude < 150
+            if urgency > 0.7 and lowAlt then
+                score = 0.80
+            elseif urgency > 0.8 then
+                score = 0.60
+            else
+                score = 0.05
+            end
+
+        -- ── Reset distance ───────────────────────────────────
+        -- Use when enemy is dangerously close OR very far away.
+        elseif action == "reset_distance" then
+            if t then
+                if t.distance < 250 then
+                    -- Too close — create separation
+                    score = 0.75
+                elseif t.distance > 1400 then
+                    -- Too far — close in
+                    score = 0.50
+                else
+                    score = 0.05
+                end
+            end
+
+        -- ── Climb ────────────────────────────────────────────
         elseif action == "climb" then
             if t then
-                -- Worth climbing if enemy is above us
-                score = t.altDiff > 100 and 0.6 or 0.3
+                if t.altDiff > 150 then
+                    -- Enemy has significant altitude advantage
+                    score = 0.65
+                elseif percept.selfAltitude < 150 then
+                    -- Too low regardless of enemy
+                    score = 0.55
+                else
+                    score = 0.20
+                end
             else
-                score = percept.selfAltitude < 200 and 0.5 or 0.1
+                score = percept.selfAltitude < 200 and 0.45 or 0.10
             end
 
+        -- ── Dive ─────────────────────────────────────────────
         elseif action == "dive" then
-            score = (t and t.altDiff < -100) and 0.55 or 0.15
+            if t and t.altDiff < -150 then
+                score = 0.55
+            else
+                score = 0.10
+            end
 
-        elseif action == "disengage" then
-            -- Disengage when low altitude or heavily threatened
-            score = (hasThreat and percept.selfAltitude < 150) and 0.7 or 0.1
-
-        elseif action == "reset_distance" then
-            score = (t and t.distance < 150) and 0.75 or 0.1
-
+        -- ── Bomb run ─────────────────────────────────────────
         elseif action == "bomb_run" then
-            -- Only if above enemy and bombs ready
-            score = (t and percept.bombReady and t.altDiff > 150) and 0.65 or 0.0
+            if t and percept.bombReady and t.altDiff > 150 then
+                score = 0.65
+            end
 
+        -- ── Ambush ───────────────────────────────────────────
         elseif action == "ambush" then
-            score = (t and t.distance > 1200) and 0.5 or 0.0
+            if t and t.distance > 1200 then
+                score = 0.50
+            end
 
+        -- ── Bait ─────────────────────────────────────────────
         elseif action == "bait" then
-            score = (hasThreat and not t) and 0.4 or 0.15
+            -- Only useful when a threat is chasing but we have no
+            -- clean attack angle yet
+            if urgency > 0.2 and urgency < 0.6 and t then
+                score = 0.40
+            end
         end
 
-        -- Apply difficulty aggression multiplier
+        -- ── Difficulty multipliers ────────────────────────────
         if diff then
             if action == "attack" or action == "bomb_run" then
                 score = score * diff.aggressionMult
