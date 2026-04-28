@@ -2,6 +2,7 @@
 --  TacticalEvaluator.lua
 --  Scores all possible actions and returns a ranked list.
 --  Weights are adjusted by difficulty profile.
+-- I was here
 -- ============================================================
 local TacticalEvaluator = {}
 local _cfg = {}
@@ -187,7 +188,7 @@ function TacticalEvaluator.evaluate(percept, diff)
         -- ── Emergency brake ───────────────────────────────
         -- Last resort — enemy extremely close directly behind.
         elseif action == "stall_brake" then
-            if urgency > 0.75 and t and t.distance < 250 and t.isBehind then
+            if urgency > 0.4 and t and t.distance < 800 and t.isBehind then
                 score = 0.82
             end
         end
