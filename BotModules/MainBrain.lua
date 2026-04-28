@@ -180,7 +180,7 @@ end
     Phase 5 – EXECUTE
     Route the chosen action to the right subsystem.
 --]]
-local function execute(action, percept)
+local function execute(action, percept, dt)
     local body = percept.selfBody
     if not body then return end
 
@@ -188,7 +188,7 @@ local function execute(action, percept)
     -- stallTick zeroes velocity and manages the timer.
     -- While stalling, normal movement actions are suppressed
     -- so the plane doesn't fight its own stall state.
-    local stalling = FlightController.stallTick(body, _accumulator)
+    local stalling = FlightController.stallTick(body, dt)
 
     -- ── Movement actions ──────────────────────────────────
     if not stalling then
@@ -241,8 +241,6 @@ local function execute(action, percept)
 
     else
         -- ── Mid-stall: continue heading maneuver only ─────
-        -- Route to whichever stall type is active
-        local stallType = FlightController.isStalling() and _stall or nil
         if action == "stall_snap" and percept.primaryTarget then
             FlightController.snapTurn(body, percept.primaryTarget.position)
         elseif action == "stall_bait" then
@@ -256,8 +254,6 @@ local function execute(action, percept)
     end
 
     -- ── Shooting — allowed during stall (gun state persists) ─
-    -- In fact snap turns are most effective with guns firing
-    -- the moment the nose crosses the target.
     local suppressShoot = (action == "evade" or action == "disengage"
                            or action == "stall_brake" or action == "stall_bait")
     if percept.primaryTarget and not suppressShoot then
@@ -301,7 +297,7 @@ local function tick(dt)
 
         log("Action:", action, "| Target:", percept.primaryTarget and percept.primaryTarget.player.Name or "none")
 
-        execute(action, percept)
+        execute(action, percept, dt)
         reevaluate(action, percept)
     end)
 
