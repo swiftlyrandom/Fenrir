@@ -11,6 +11,10 @@ local Teams   = game:GetService("Teams")
 local PerceptionSystem = {}
 local _cfg = {}
 
+-- Stores previous velocity per player for acceleration estimation
+-- prevVel[player] = { vel: Vector3, time: number }
+local _prevVel = {}
+
 -- ── All recognised plane names ───────────────────────────────
 local PLANE_NAMES = {
     ["Bomber"]         = true,
@@ -124,15 +128,30 @@ function PerceptionSystem.snapshot(cfg)
                     local angle    = math.deg(math.acos(dot))
                     local isBehind = dot < -0.2
 
+                    local eVel = enemyBody.AssemblyLinearVelocity
+                    local now  = tick()
+
+                    -- Derive acceleration from velocity delta since last snapshot
+                    local accel = nil
+                    local prev  = _prevVel[player]
+                    if prev then
+                        local dt = now - prev.time
+                        if dt > 0 and dt < 0.5 then  -- ignore stale entries
+                            accel = (eVel - prev.vel) / dt
+                        end
+                    end
+                    _prevVel[player] = { vel = eVel, time = now }
+
                     local targetInfo = {
-                        player   = player,
-                        position = ePos,
-                        velocity = enemyBody.AssemblyLinearVelocity,
-                        distance = dist,
-                        altitude = ePos.Y,
-                        altDiff  = ePos.Y - myBody.Position.Y,
-                        angle    = angle,
-                        isBehind = isBehind,
+                        player       = player,
+                        position     = ePos,
+                        velocity     = eVel,
+                        acceleration = accel,   -- Vector3 or nil
+                        distance     = dist,
+                        altitude     = ePos.Y,
+                        altDiff      = ePos.Y - myBody.Position.Y,
+                        angle        = angle,
+                        isBehind     = isBehind,
                     }
 
                     table.insert(percept.targets, targetInfo)
@@ -155,6 +174,7 @@ end
 
 function PerceptionSystem.init(cfg)
     _cfg = cfg or {}
+    _prevVel = {}
 end
 
 return PerceptionSystem
