@@ -7,7 +7,7 @@
 --    local Brain = require(path.to.MainBrain)
 --    Brain.init({ difficulty = "Hard" })
 --    Brain.start()
--- I was here,
+-- I was here, apparently
 -- ============================================================
 
 local RunService   = game:GetService("RunService")
