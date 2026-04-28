@@ -40,9 +40,9 @@ end
 --- Attack score based on distance. Sweet spot 300-700 studs.
 --- Falls off sharply below 150 (too close) and above 1000 (too far).
 local function attackScoreForDist(dist)
-    if dist < 150 then
+    if dist < 100 then
         -- Inside minimum — can't aim properly
-        return 0.3 + (dist / 150) * 0.3   -- 0.3 -> 0.6
+        return 0.5 + (dist / 150) * 0.3   -- 0.3 -> 0.6
     elseif dist <= 700 then
         -- Ideal engagement range
         return 0.85
@@ -92,7 +92,7 @@ function TacticalEvaluator.evaluate(percept, diff)
         elseif action == "evade" then
             if urgency > 0.3 then
                 -- Scale from 0.45 (mild) up to 0.85 (critical)
-                score = 0.45 + (urgency - 0.3) / 0.7 * 0.40
+                score = 0.40 + (urgency - 0.3) / 0.7 * 0.40
             end
 
         -- ── Disengage ────────────────────────────────────────
