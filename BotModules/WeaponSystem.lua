@@ -12,20 +12,55 @@ local _shooting  = false
 local _bombTimer = 0
 local BOMB_COOLDOWN = 8  -- seconds between bomb drops
 
+local Players = game:GetService("Players")
+
 -- ── Confidence thresholds (by difficulty) ───────────────────
 local CONF_THRESHOLD = {
-    Easy   = 0.85,  -- only fires with very high confidence
+    Easy   = 0.85,
     Medium = 0.70,
     Hard   = 0.55,
     Elite  = 0.40,
 }
 
---- Predict where a moving target will be after travel time.
-local function predictAimPoint(selfPos, targetPos, targetVel, bulletSpeed)
-    bulletSpeed = bulletSpeed or 1800  -- 1800 studs/s (matches your 1800 stud limit)
-    local dist  = (targetPos - selfPos).Magnitude
-    local t     = dist / bulletSpeed
-    return targetPos + targetVel * t
+-- ── Aim config ───────────────────────────────────────────────
+-- estimatedPingMs: conservative ping estimate for the bot's
+-- client. Roblox adds ~half RTT of latency before the server
+-- sees the FireServer call and spawns the bullet.
+-- Tune this to match your server's typical player ping.
+-- 80ms is a reasonable default for a same-region bot account.
+local AIM_CONFIG = {
+    bulletSpeed     = 1800,   -- studs/s — match your game's bullet speed
+    estimatedPingMs = 80,     -- ms — bot client → server round trip estimate
+    accelLookAhead  = 0.08,   -- seconds of target acceleration to sample
+}
+
+--- Predict where a moving target will be, accounting for:
+---   1. Bullet travel time (dist / bulletSpeed)
+---   2. Server-side ping delay (bullet spawns after FireServer latency)
+---   3. Target acceleration approximation (velocity delta over short window)
+local function predictAimPoint(selfPos, targetPos, targetVel, targetAccel)
+    local bulletSpeed = AIM_CONFIG.bulletSpeed
+    local pingSec     = AIM_CONFIG.estimatedPingMs / 1000
+
+    local dist = (targetPos - selfPos).Magnitude
+
+    -- Time for bullet to travel to where the target currently is
+    local travelTime = dist / bulletSpeed
+
+    -- Total lead time = bullet travel + half ping (one-way server latency)
+    -- We use half RTT because FireServer takes ~half the round trip
+    -- before the server processes the shot.
+    local totalLead = travelTime + (pingSec * 0.5)
+
+    -- Apply velocity lead
+    local leadPos = targetPos + targetVel * totalLead
+
+    -- Apply acceleration if available (improves aim on turning targets)
+    if targetAccel then
+        leadPos = leadPos + targetAccel * (totalLead * totalLead * 0.5)
+    end
+
+    return leadPos
 end
 
 --- Angle (degrees) between our look vector and target direction.
@@ -47,11 +82,21 @@ function WeaponSystem.tryShoot(percept, diff)
     if not percept.ammoReady     then return end
     if not _fireEvent             then return end
 
-    local body     = percept.selfBody
-    local target   = percept.primaryTarget
-    local aimPos   = predictAimPoint(body.Position, target.position, target.velocity)
-    local err      = aimError(body, aimPos)
-    local conf     = calcConfidence(err)
+    local body   = percept.selfBody
+    local target = percept.primaryTarget
+
+    -- Pass target acceleration if PerceptionSystem tracked it
+    -- (targetAccel will be nil if not yet implemented — that's fine,
+    --  predictAimPoint handles nil gracefully)
+    local aimPos  = predictAimPoint(
+        body.Position,
+        target.position,
+        target.velocity,
+        target.acceleration   -- nil until PerceptionSystem tracks it
+    )
+
+    local err     = aimError(body, aimPos)
+    local conf    = calcConfidence(err)
     local threshold = CONF_THRESHOLD[_cfg.difficulty] or 0.55
 
     if conf >= threshold then
@@ -97,6 +142,13 @@ function WeaponSystem.init(cfg, fireEvent)
     _fireEvent = fireEvent
     _shooting  = false
     _bombTimer = 0
+    -- Allow ping override from BOT_CONFIG
+    if _cfg.estimatedPingMs then
+        AIM_CONFIG.estimatedPingMs = _cfg.estimatedPingMs
+    end
+    if _cfg.bulletSpeed then
+        AIM_CONFIG.bulletSpeed = _cfg.bulletSpeed
+    end
 end
 
 return WeaponSystem
