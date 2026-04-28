@@ -313,23 +313,28 @@ end
 
 --- Initialize the bot with optional config overrides.
 --- Call once before start().
+```lua id="fix28601"
+-- FIX THIS INSIDE MainBrain.init(cfg)
+
 function MainBrain.init(cfg)
     _config = setmetatable(cfg or {}, { __index = DEFAULTS })
 
-    -- Seed RNG for difficulty noise
-    math.randomseed(tick())
+    -- OLD BROKEN:
+    -- math.randomseed(tick())
 
-    -- Init subsystems
+    -- FIXED:
+    math.randomseed(os.clock() * 100000)
+
     DifficultyController.init(_config.difficulty)
+
     FlightController.init(_config, function(wantRunning)
-        -- Engine control callback — FlightController calls this
-        -- to cut/restart engine without touching fireEvent directly
         if wantRunning then
             startEngine()
         else
             stopEngine()
         end
     end)
+
     WeaponSystem.init(_config, fireEvent)
     DefenseSystem.init(_config)
     PerceptionSystem.init(_config)
@@ -340,6 +345,8 @@ function MainBrain.init(cfg)
 
     log("Initialized. Difficulty:", _config.difficulty)
 end
+```
+
 
 --- Start the decision loop and engine.
 function MainBrain.start()
