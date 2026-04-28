@@ -30,7 +30,7 @@ local CONF_THRESHOLD = {
 -- 80ms is a reasonable default for a same-region bot account.
 local AIM_CONFIG = {
     bulletSpeed     = 1800,   -- studs/s — match your game's bullet speed
-    estimatedPingMs = 80,     -- ms — bot client → server round trip estimate
+    estimatedPingMs = 80,     -- ms — bot client -> server round trip estimate
     accelLookAhead  = 0.08,   -- seconds of target acceleration to sample
 }
 
