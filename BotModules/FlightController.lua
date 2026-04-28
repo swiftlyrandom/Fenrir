@@ -12,7 +12,6 @@
 
 local RunService = game:GetService("RunService")
 
-
 -- ── Helpers ─────────────────────────────────────────────────
 local function lerp(a, b, t)
     return a + (b - a) * t
@@ -47,7 +46,6 @@ local _maneuver = {
 --  CONFIG (overridden partially by MainBrain.init)
 -- ============================================================
 local CONFIG = {
-    
     -- Turning
     gyroDampening     = 0.8,
     gyroMaxTorque     = 5e5,
@@ -73,7 +71,7 @@ local CONFIG = {
     leadCoeff         = 1.2,
 
     -- Weave
-    weaveAmplitude    = 50,
+    weaveAmplitude    = 40,
     weavePeriod       = 1.4,
 
     -- Split-S
@@ -295,7 +293,7 @@ function FlightController.weave(body, dt)
     -- Vertical cosine wave at half frequency — creates a figure-8
     -- style path so the bot isn't locked to a flat Y plane.
     -- Clamped so it never weaves into the ground.
-    local vertOffset = math.cos(c * freq) * (CONFIG.weaveAmplitude * 1.2)
+    local vertOffset = math.cos(c * freq * 0.5) * (CONFIG.weaveAmplitude * 0.7)
     local projectedY = body.Position.Y + vertOffset
     if projectedY < CONFIG.minSafeAltitude + 30 then
         vertOffset = math.abs(vertOffset)   -- force upward near ground
@@ -373,9 +371,9 @@ end
 --- Internal: begin a stall. Cuts engine, zeroes velocity.
 local function beginStall(body, maneuverTag)
     if _stall.active then return end
-    if body.Position.Y < CONFIG.stallMinAltitude then print("[Stall] Blocked - too low:", body.Position.Y) return end
-    if not _engineControl then print("[Stall] Blocked - no engineControl callback") return end
-    print("[Stall] BEGIN:", maneuverTag, "| Alt:", body.Position.Y)
+    if body.Position.Y < CONFIG.stallMinAltitude then return end
+    if not _engineControl then return end
+
     _stall.active   = true
     _stall.timer    = 0
     _stall.maneuver = maneuverTag
@@ -404,16 +402,18 @@ function FlightController.stallTick(body, dt)
 
     _stall.timer = _stall.timer + (dt or 0.05)
 
-    -- Keep velocity zeroed every tick during stall —
-    -- without this, BodyVelocity drifts back up from physics.
+    -- Keep velocity zeroed every tick during stall
     haltVelocity(body)
 
     if _stall.timer >= CONFIG.stallDuration then
-        print("[Stall] END:", _stall.maneuver, "| duration:", _stall.timer)
         endStall()
+        -- Immediately write combat speed so there's no coast gap
+        -- between stall end and next decision tick
+        setSpeed(body, CONFIG.combatSpeed)
+        return false  -- stall just ended, resume normal flight this tick
     end
 
-    return true  -- stall still active (or just ended this tick)
+    return true  -- stall still active
 end
 
 --- Snap turn: cut engine, flick nose onto target, restart.
