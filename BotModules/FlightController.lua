@@ -80,6 +80,22 @@ local CONFIG = {
     -- Bomb approach
     bombApproachAlt   = 300,
     bombRunSpeed      = 160,
+
+    -- Stall mechanic
+    stallDuration     = 1.0,    -- seconds engine stays off per stall (configurable)
+    stallMinAltitude  = 120,    -- won't initiate a stall below this altitude
+}
+
+-- ── Engine control callback (injected by MainBrain.init) ─────
+-- Called with true to start engine, false to stop it.
+-- FlightController never fires remotes directly.
+local _engineControl = nil
+
+-- ── Stall state ──────────────────────────────────────────────
+local _stall = {
+    active    = false,
+    timer     = 0,
+    maneuver  = "none",   -- "snap" | "bait" | "brake"
 }
 
 -- ============================================================
@@ -346,6 +362,120 @@ function FlightController.barrelOffset(body, side, dt)
 end
 
 -- ============================================================
+--  STALL MANEUVERS
+--  All three cut the engine, manipulate heading only, then
+--  restart. BodyVelocity is zeroed during the stall window so
+--  the plane actually bleeds speed instead of coasting.
+-- ============================================================
+
+--- Internal: begin a stall. Cuts engine, zeroes velocity.
+local function beginStall(body, maneuverTag)
+    if _stall.active then return end
+    if body.Position.Y < CONFIG.stallMinAltitude then return end
+    if not _engineControl then return end
+
+    _stall.active   = true
+    _stall.timer    = 0
+    _stall.maneuver = maneuverTag
+
+    _engineControl(false)   -- cut engine
+    haltVelocity(body)      -- zero thrust so plane actually slows
+end
+
+--- Internal: end a stall. Restarts engine.
+local function endStall()
+    if not _stall.active then return end
+    _stall.active   = false
+    _stall.timer    = 0
+    _stall.maneuver = "none"
+    if _engineControl then
+        _engineControl(true)
+    end
+end
+
+--- Must be called every tick (from DefenseSystem or MainBrain Heartbeat).
+--- Advances stall timer and ends stall when duration expires.
+--- Returns true while a stall is active so callers can suppress
+--- normal speed writes.
+function FlightController.stallTick(body, dt)
+    if not _stall.active then return false end
+
+    _stall.timer = _stall.timer + (dt or 0.05)
+
+    -- Keep velocity zeroed every tick during stall —
+    -- without this, BodyVelocity drifts back up from physics.
+    haltVelocity(body)
+
+    if _stall.timer >= CONFIG.stallDuration then
+        endStall()
+    end
+
+    return true  -- stall still active (or just ended this tick)
+end
+
+--- Snap turn: cut engine, flick nose onto target, restart.
+--- Best used when enemy has just overshot — their momentum
+--- carries them into our sights during the stall window.
+function FlightController.snapTurn(body, targetPos, dt)
+    if not _stall.active then
+        beginStall(body, "snap")
+    end
+
+    if _stall.active then
+        -- Aggressive heading snap toward target during stall —
+        -- faster than normal combat lerp since we have no momentum drag
+        setHeading(body, targetPos, getLerp() * 1.4)
+        haltVelocity(body)
+    end
+end
+
+--- Stall bait: bleed speed to force an enemy overshoot.
+--- Bot slows dramatically then snaps heading as enemy flies past.
+--- Transitions automatically into a snap turn at mid-stall.
+function FlightController.stallBait(body, targetPos, dt)
+    if not _stall.active then
+        beginStall(body, "bait")
+    end
+
+    if _stall.active then
+        local halfDuration = CONFIG.stallDuration * 0.5
+
+        if _stall.timer < halfDuration then
+            -- Phase 1: hold heading steady, just bleed speed
+            -- Gentle drift forward so we don't look frozen
+            local holdTarget = body.Position + body.CFrame.LookVector * 300
+            setHeading(body, holdTarget, getLerp() * 0.5)
+        else
+            -- Phase 2: enemy should be overshooting — snap onto them
+            setHeading(body, targetPos, getLerp() * 1.4)
+        end
+
+        haltVelocity(body)
+    end
+end
+
+--- Emergency brake: hard stop when enemy is very close behind.
+--- Causes enemy to overshoot, then restart and engage.
+function FlightController.emergencyBrake(body, dt)
+    if not _stall.active then
+        beginStall(body, "brake")
+    end
+
+    if _stall.active then
+        -- During brake: maintain current heading — don't turn,
+        -- just let momentum die. Enemy flies past on their own.
+        local holdTarget = body.Position + body.CFrame.LookVector * 300
+        setHeading(body, holdTarget, getLerp() * 0.4)  -- barely moving heading
+        haltVelocity(body)
+    end
+end
+
+--- Returns whether a stall is currently active.
+function FlightController.isStalling()
+    return _stall.active
+end
+
+-- ============================================================
 --  STATE RESET
 -- ============================================================
 
@@ -354,16 +484,29 @@ function FlightController.resetManeuver()
     _maneuver.phase      = 0
     _maneuver.timer      = 0
     _maneuver.weaveClock = 0
+    -- Also end any active stall cleanly
+    if _stall.active and _engineControl then
+        _engineControl(true)
+    end
+    _stall.active   = false
+    _stall.timer    = 0
+    _stall.maneuver = "none"
 end
 
 -- ============================================================
 --  INIT
 -- ============================================================
 
-function FlightController.init(cfg)
+function FlightController.init(cfg, engineControl)
     _cfg = cfg or {}
-    if _cfg.cruiseSpeed then CONFIG.cruiseSpeed = _cfg.cruiseSpeed end
-    if _cfg.combatSpeed then CONFIG.combatSpeed = _cfg.combatSpeed end
+    if _cfg.cruiseSpeed    then CONFIG.cruiseSpeed    = _cfg.cruiseSpeed    end
+    if _cfg.combatSpeed    then CONFIG.combatSpeed    = _cfg.combatSpeed    end
+    if _cfg.stallDuration  then CONFIG.stallDuration  = _cfg.stallDuration  end
+    if _cfg.stallMinAltitude then CONFIG.stallMinAltitude = _cfg.stallMinAltitude end
+
+    -- engineControl(bool) callback — provided by MainBrain
+    _engineControl = engineControl or nil
+
     FlightController.resetManeuver()
 end
 
