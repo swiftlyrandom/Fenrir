@@ -9,7 +9,8 @@ local _cfg = {}
 local ACTIONS = {
     "attack", "bomb_run", "climb", "dive",
     "disengage", "reset_distance", "ambush",
-    "bait", "evade", "idle"
+    "bait", "evade", "idle",
+    "stall_snap", "stall_bait", "stall_brake",
 }
 
 -- ============================================================
@@ -163,6 +164,31 @@ function TacticalEvaluator.evaluate(percept, diff)
             -- clean attack angle yet
             if urgency > 0.2 and urgency < 0.6 and t then
                 score = 0.40
+            end
+
+        -- ── Stall snap turn ───────────────────────────────
+        -- Best when enemy has just overshot — was behind, now
+        -- crossing into front arc at close range.
+        elseif action == "stall_snap" then
+            if t and urgency > 0.5 and t.distance < 400 then
+                local facingBonus = t.angle < 60 and 0.15 or 0
+                score = 0.72 + facingBonus
+            end
+
+        -- ── Stall bait ────────────────────────────────────
+        -- Enemy closing fast from behind at medium range.
+        -- Don't use when urgency is critical — too slow to react.
+        elseif action == "stall_bait" then
+            if t and urgency > 0.25 and urgency < 0.65
+               and t.distance < 600 and t.isBehind then
+                score = 0.60
+            end
+
+        -- ── Emergency brake ───────────────────────────────
+        -- Last resort — enemy extremely close directly behind.
+        elseif action == "stall_brake" then
+            if urgency > 0.75 and t and t.distance < 250 and t.isBehind then
+                score = 0.82
             end
         end
 
