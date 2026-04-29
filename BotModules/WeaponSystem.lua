@@ -72,7 +72,7 @@ end
 
 --- Confidence score: 1.0 = perfectly on target, 0.0 = way off.
 local function calcConfidence(error_deg)
-    return math.max(0, 1 - error_deg / 15)
+    return math.max(0, 1 - error_deg / 30)
 end
 
 --- Attempt to fire guns if confidence is high enough.
