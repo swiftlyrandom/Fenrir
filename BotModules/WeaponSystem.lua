@@ -19,7 +19,7 @@ local CONF_THRESHOLD = {
     Easy   = 0.85,
     Medium = 0.70,
     Hard   = 0.55,
-    Elite  = 0.40,
+    Elite  = 0.75,
 }
 
 -- ── Aim config ───────────────────────────────────────────────
