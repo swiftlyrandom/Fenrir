@@ -35,11 +35,12 @@ local _cfg = {}
 
 -- ── Per-maneuver state ───────────────────────────────────────
 local _maneuver = {
-    type       = "none",
-    phase      = 0,
-    timer      = 0,
-    weaveDir   = 1,
-    weaveClock = 0,
+    type          = "none",
+    phase         = 0,
+    timer         = 0,
+    weaveDir      = 1,
+    weaveClock    = 0,
+    jinkClock     = 0,   -- separate clock for combat jinking
 }
 
 -- ============================================================
@@ -69,6 +70,12 @@ local CONFIG = {
 
     -- Intercept lead coefficient
     leadCoeff         = 1.2,
+
+    -- Combat jink (micro-weave baked into attack passes)
+    -- Keeps the bot off a straight predictable line while still
+    -- converging on the aim point. Subtle — too large and aim suffers.
+    jinkAmplitude     = 18,    -- studs of lateral/vertical offset while attacking
+    jinkPeriod        = 0.9,   -- seconds per jink cycle (faster = harder to track)
 
     -- Weave
     weaveAmplitude    = 40,
@@ -193,11 +200,38 @@ end
 --  PUBLIC MANEUVERS
 -- ============================================================
 
-function FlightController.intercept(body, targetPos, targetVel)
+-- intercept: predictive aim toward target with a subtle combat jink
+-- so the bot isn't flying a straight line while trading shots.
+-- dt is passed from execute so the jink clock advances at real time.
+function FlightController.intercept(body, targetPos, targetVel, dt)
     targetVel = targetVel or Vector3.zero
+    dt = dt or 0.016
+
+    -- Advance jink clock
+    _maneuver.jinkClock = (_maneuver.jinkClock or 0) + dt
+    local jc = _maneuver.jinkClock
+    local jFreq = (2 * math.pi / CONFIG.jinkPeriod)
+
+    -- Compute predictive intercept point
     local intercept = predictIntercept(targetPos, targetVel, body.Position, CONFIG.combatSpeed)
     local correction = altitudeCorrection(body)
-    setHeading(body, intercept + correction, getLerp())
+    local aimPos = intercept + correction
+
+    -- Jink offset: small lateral + vertical oscillation perpendicular
+    -- to our current heading. Applied to our PATH, not the aim point,
+    -- so the nose still points at the target but we're not flying
+    -- straight at them.
+    local jinkRight = body.CFrame.RightVector * (math.sin(jc * jFreq) * CONFIG.jinkAmplitude)
+    local jinkUp    = body.CFrame.UpVector    * (math.cos(jc * jFreq * 1.3) * CONFIG.jinkAmplitude * 0.6)
+
+    -- Blend: aim point weighted heavily (0.85) so accuracy holds,
+    -- jink offset weighted lightly (0.15) so path varies.
+    -- As distance closes, reduce jink so final approach is accurate.
+    local dist = (targetPos - body.Position).Magnitude
+    local jinkWeight = math.min(1, dist / 400) * 0.5  -- fades out under 400 studs
+    local finalAim = aimPos + (jinkRight + jinkUp) * jinkWeight
+
+    setHeading(body, finalAim, getLerp())
     setSpeed(body, CONFIG.combatSpeed)
 end
 
@@ -416,7 +450,30 @@ function FlightController.stallTick(body, dt)
     return true  -- stall still active
 end
 
---- Snap turn: cut engine, flick nose onto target, restart.
+--- Called every Heartbeat during a stall to keep nose on nearest enemy.
+--- Returns true if a target was found and faced.
+--- WeaponSystem.tryShoot should be called after this — guns stay hot
+--- during the stall since we never fire shoot=false here.
+function FlightController.stallFaceNearest(body, targets)
+    if not _stall.active then return false end
+    if not targets or #targets == 0 then return false end
+
+    -- Find closest target
+    local nearest, nearestDist = nil, math.huge
+    for _, t in ipairs(targets) do
+        if t.distance < nearestDist then
+            nearest = t
+            nearestDist = t.distance
+        end
+    end
+
+    if nearest then
+        -- Snap aggressively — stall is our window, use it
+        setHeading(body, nearest.position, getLerp() * 1.6)
+        return true
+    end
+    return false
+end
 --- Best used when enemy has just overshot — their momentum
 --- carries them into our sights during the stall window.
 function FlightController.snapTurn(body, targetPos, dt)
@@ -487,7 +544,7 @@ function FlightController.resetManeuver()
     _maneuver.phase      = 0
     _maneuver.timer      = 0
     _maneuver.weaveClock = 0
-    -- Also end any active stall cleanly
+    _maneuver.jinkClock  = 0
     if _stall.active and _engineControl then
         _engineControl(true)
     end
