@@ -16,10 +16,10 @@ local Players = game:GetService("Players")
 
 -- ── Confidence thresholds (by difficulty) ───────────────────
 local CONF_THRESHOLD = {
-    Easy   = 0.85,
-    Medium = 0.70,
-    Hard   = 0.55,
-    Elite  = 0.75,
+    Easy   = 0.70,
+    Medium = 0.55,
+    Hard   = 0.35,
+    Elite  = 0.48,
 }
 
 -- ── Aim config ───────────────────────────────────────────────
@@ -72,8 +72,7 @@ end
 
 --- Confidence score: 1.0 = perfectly on target, 0.0 = way off.
 local function calcConfidence(error_deg)
-    -- Linear falloff: 0° = 1.0, 5° = 0.0
-    return math.max(0, 1 - error_deg / 5)
+    return math.max(0, 1 - error_deg / 15)
 end
 
 --- Attempt to fire guns if confidence is high enough.
