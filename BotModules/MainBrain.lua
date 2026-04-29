@@ -188,18 +188,15 @@ end
 local function execute(action, percept, dt)
     local body = percept.selfBody
     if not body then return end
+    dt = dt or 0.016
 
-    -- ── If a stall is active, tick it first.
-    -- stallTick zeroes velocity and manages the timer.
-    -- While stalling, normal movement actions are suppressed
-    -- so the plane doesn't fight its own stall state.
     local stalling = FlightController.stallTick(body, dt)
 
-    -- ── Movement actions ──────────────────────────────────
     if not stalling then
-        -- Normal powered flight actions
         if action == "attack" then
-            FlightController.intercept(body, percept.primaryTarget.position)
+            -- Pass dt so jink clock advances at real time
+            FlightController.intercept(body, percept.primaryTarget.position,
+                percept.primaryTarget.velocity, dt)
 
         elseif action == "bomb_run" then
             FlightController.approachBomb(body, percept.primaryTarget.position)
@@ -229,7 +226,6 @@ local function execute(action, percept, dt)
         elseif action == "idle" then
             FlightController.cruise(body)
 
-        -- ── Stall maneuvers (initiate from here) ──────────
         elseif action == "stall_snap" then
             local tPos = percept.primaryTarget and percept.primaryTarget.position
                          or body.Position + body.CFrame.LookVector * 300
@@ -245,27 +241,29 @@ local function execute(action, percept, dt)
         end
 
     else
-        -- ── Mid-stall: continue heading maneuver only ─────
-        if action == "stall_snap" and percept.primaryTarget then
-            FlightController.snapTurn(body, percept.primaryTarget.position)
-        elseif action == "stall_bait" then
-            local tPos = percept.primaryTarget and percept.primaryTarget.position
-                         or body.Position + body.CFrame.LookVector * 300
-            FlightController.stallBait(body, tPos)
-        elseif action == "stall_brake" then
-            FlightController.emergencyBrake(body)
+        -- Mid-stall: always face nearest enemy and keep guns hot.
+        -- stallFaceNearest handles heading — guns fire if on target.
+        -- This replaces the per-action stall routing since facing
+        -- the nearest enemy is always the right call during a stall.
+        FlightController.stallFaceNearest(body, percept.targets)
+
+        -- Force guns on during stall — don't wait for confidence gate,
+        -- the nose is snapping onto them anyway. WeaponSystem still
+        -- checks confidence so it won't fire if way off target.
+        if percept.primaryTarget then
+            WeaponSystem.tryShoot(percept, DifficultyController.get(_config.difficulty))
         end
-        -- All other actions suppressed during stall
     end
 
-    -- ── Shooting — allowed during stall (gun state persists) ─
-    local suppressShoot = (action == "evade" or action == "disengage"
-                           or action == "stall_brake" or action == "stall_bait")
-    if percept.primaryTarget and not suppressShoot then
-        WeaponSystem.tryShoot(percept, DifficultyController.get(_config.difficulty))
+    -- Shooting during normal flight
+    if not stalling then
+        local suppressShoot = (action == "evade" or action == "disengage"
+                               or action == "stall_brake" or action == "stall_bait")
+        if percept.primaryTarget and not suppressShoot then
+            WeaponSystem.tryShoot(percept, DifficultyController.get(_config.difficulty))
+        end
     end
 
-    -- ── Persistent defense checks ─────────────────────────
     DefenseSystem.checkPassive(body, percept)
 end
 
